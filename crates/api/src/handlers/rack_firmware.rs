@@ -1007,11 +1007,8 @@ pub async fn apply(
             continue;
         }
 
-        let mut firmware_components = find_firmware_components_for_device(
-            &parsed_components,
-            lookup_key,
-            &req.firmware_type,
-        );
+        let mut firmware_components =
+            find_firmware_components_for_device(&parsed_components, lookup_key, &req.firmware_type);
 
         // Sort components into the required flashing order for this device type
         let flash_order = get_firmware_flash_order(lookup_key);
