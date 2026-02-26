@@ -20,7 +20,7 @@ use std::fs;
 use ::rpc::admin_cli::{CarbideCliError, OutputFormat};
 use prettytable::{Cell, Row, Table};
 
-use super::args::{Apply, Create, Delete, Get, List};
+use super::args::{Apply, Create, Delete, Get, List, Status};
 use crate::rpc::ApiClient;
 
 pub async fn create(
@@ -279,30 +279,39 @@ pub async fn apply(
                 "device_type": r.device_type,
                 "success": r.success,
                 "message": r.message,
+                "job_id": r.job_id,
+                "node_jobs": r.node_jobs.iter().map(|j| serde_json::json!({
+                    "node_id": j.node_id,
+                    "job_id": j.job_id,
+                })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
         let mut table = Table::new();
         table.set_titles(Row::new(vec![
-            Cell::new("Device ID"),
-            Cell::new("Hardware Type"),
+            Cell::new("Device Type"),
             Cell::new("Status"),
-            Cell::new("Message"),
+            Cell::new("Job ID"),
         ]));
 
         for device_result in &response.device_results {
             let status_text = if device_result.success {
-                "SUCCESS"
+                "INITIATED"
             } else {
                 "FAILED"
             };
 
+            let job_id_display = if device_result.job_id.is_empty() {
+                "-".to_string()
+            } else {
+                device_result.job_id.clone()
+            };
+
             table.add_row(Row::new(vec![
-                Cell::new(&device_result.device_id),
                 Cell::new(&device_result.device_type),
                 Cell::new(status_text),
-                Cell::new(&device_result.message),
+                Cell::new(&job_id_display),
             ]));
         }
 
@@ -311,8 +320,38 @@ pub async fn apply(
         println!("{}", "=".repeat(80));
         table.printstd();
         println!("\nTotal updates: {}", response.total_updates);
-        println!("Successful: {}", response.successful_updates);
-        println!("Failed: {}", response.failed_updates);
+        println!("Successfully initiated: {}", response.successful_updates);
+        println!("Failed to initiate: {}", response.failed_updates);
+
+        // Print per-node job details if any exist
+        let has_node_jobs = response
+            .device_results
+            .iter()
+            .any(|r| !r.node_jobs.is_empty());
+        if has_node_jobs {
+            println!("\n{}", "-".repeat(80));
+            println!("Per-Node Job IDs (use with GetFirmwareJobStatus to track progress)");
+            println!("{}", "-".repeat(80));
+
+            let mut node_table = Table::new();
+            node_table.set_titles(Row::new(vec![
+                Cell::new("Device Type"),
+                Cell::new("Node ID"),
+                Cell::new("Job ID"),
+            ]));
+
+            for device_result in &response.device_results {
+                for node_job in &device_result.node_jobs {
+                    node_table.add_row(Row::new(vec![
+                        Cell::new(&device_result.device_type),
+                        Cell::new(&node_job.node_id),
+                        Cell::new(&node_job.job_id),
+                    ]));
+                }
+            }
+
+            node_table.printstd();
+        }
     }
 
     if response.failed_updates > 0 {
@@ -320,6 +359,52 @@ pub async fn apply(
             "{} firmware updates failed",
             response.failed_updates
         )));
+    }
+
+    Ok(())
+}
+
+pub async fn get_job_status(
+    opts: Status,
+    format: OutputFormat,
+    api_client: &ApiClient,
+) -> Result<(), CarbideCliError> {
+    let request = rpc::forge::RackFirmwareJobStatusRequest {
+        job_id: opts.job_id,
+    };
+
+    let response = api_client
+        .0
+        .get_rack_firmware_job_status(request)
+        .await
+        .map_err(CarbideCliError::from)?;
+
+    if format == OutputFormat::Json {
+        let result = serde_json::json!({
+            "job_id": response.job_id,
+            "state": response.state,
+            "state_description": response.state_description,
+            "rack_id": response.rack_id,
+            "node_id": response.node_id,
+            "error_message": response.error_message,
+            "result_json": response.result_json,
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("Firmware Job Status");
+        println!("  Job ID:      {}", response.job_id);
+        println!("  State:       {}", response.state);
+        println!("  Description: {}", response.state_description);
+        println!("  Rack:        {}", response.rack_id);
+        println!("  Node:        {}", response.node_id);
+
+        if !response.error_message.is_empty() {
+            println!("  Error:       {}", response.error_message);
+        }
+
+        if !response.result_json.is_empty() {
+            println!("  Result:      {}", response.result_json);
+        }
     }
 
     Ok(())

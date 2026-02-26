@@ -366,6 +366,7 @@ impl InternalRBACRules {
         x.perm("ListRackFirmware", vec![ForgeAdminCLI]);
         x.perm("GetRackFirmware", vec![ForgeAdminCLI]);
         x.perm("ApplyRackFirmware", vec![ForgeAdminCLI]);
+        x.perm("GetRackFirmwareJobStatus", vec![ForgeAdminCLI]);
         x.perm("RebootCompleted", vec![Machineatron, Scout]);
         x.perm("PersistValidationResult", vec![Scout]);
         x.perm("GetMachineValidationResults", vec![ForgeAdminCLI, Scout]);

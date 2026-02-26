@@ -35,6 +35,9 @@ impl Dispatch for Cmd {
             Cmd::List(args) => cmds::list(args, ctx.config.format, &ctx.api_client).await?,
             Cmd::Delete(args) => cmds::delete(args, &ctx.api_client).await?,
             Cmd::Apply(args) => cmds::apply(args, ctx.config.format, &ctx.api_client).await?,
+            Cmd::Status(args) => {
+                cmds::get_job_status(args, ctx.config.format, &ctx.api_client).await?
+            }
         }
         Ok(())
     }

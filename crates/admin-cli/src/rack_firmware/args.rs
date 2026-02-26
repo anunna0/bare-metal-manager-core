@@ -36,6 +36,9 @@ pub enum Cmd {
 
     #[clap(about = "Apply firmware to all devices in a rack")]
     Apply(Apply),
+
+    #[clap(about = "Check the status of an async firmware update job")]
+    Status(Status),
 }
 
 #[derive(Parser, Debug)]
@@ -74,4 +77,10 @@ pub struct Apply {
 
     #[clap(help = "Firmware type: dev or prod", value_parser = ["dev", "prod"])]
     pub firmware_type: String,
+}
+
+#[derive(Parser, Debug)]
+pub struct Status {
+    #[clap(help = "Job ID to check status for (from apply output)")]
+    pub job_id: String,
 }
