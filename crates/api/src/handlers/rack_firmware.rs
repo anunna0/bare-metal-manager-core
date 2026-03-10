@@ -24,7 +24,7 @@ use forge_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use rpc::forge::{
     DeviceUpdateResult, NodeJobInfo, RackFirmware, RackFirmwareApplyRequest,
     RackFirmwareApplyResponse, RackFirmwareCreateRequest, RackFirmwareDeleteRequest,
-    RackFirmwareGetRequest, RackFirmwareHistoryEntry, RackFirmwareHistoryRequest,
+    RackFirmwareGetRequest, RackFirmwareHistoryRecord, RackFirmwareHistoryRequest,
     RackFirmwareHistoryResponse, RackFirmwareJobStatusRequest, RackFirmwareJobStatusResponse,
     RackFirmwareList, RackFirmwareListRequest,
 };
@@ -1376,7 +1376,7 @@ pub async fn get_history(
 
     let entries = history
         .into_iter()
-        .map(|(entry, firmware_available)| RackFirmwareHistoryEntry {
+        .map(|(entry, firmware_available)| RackFirmwareHistoryRecord {
             firmware_id: entry.firmware_id,
             rack_id: entry.rack_id,
             firmware_type: entry.firmware_type,

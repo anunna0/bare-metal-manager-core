@@ -6687,10 +6687,10 @@ message RackFirmwareHistoryRequest {
 }
 
 message RackFirmwareHistoryResponse {
-  repeated RackFirmwareHistoryEntry entries = 1;
+  repeated RackFirmwareHistoryRecord entries = 1;
 }
 
-message RackFirmwareHistoryEntry {
+message RackFirmwareHistoryRecord {
   string firmware_id = 1;
   string rack_id = 2;
   string firmware_type = 3;
