@@ -255,52 +255,38 @@ impl RackFirmware {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[crate::sqlx_test]
     async fn test_apply_history_record_and_list(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
 
         // Create a firmware config so we can verify the availability join
-        RackFirmware::create(
-            &mut *txn,
-            "fw-001",
-            json!({"Id": "fw-001"}),
-            None,
-        )
-        .await
-        .unwrap();
-        RackFirmware::set_available(&mut *txn, "fw-001", true)
+        RackFirmware::create(&mut txn, "fw-001", json!({"Id": "fw-001"}), None)
+            .await
+            .unwrap();
+        RackFirmware::set_available(&mut txn, "fw-001", true)
             .await
             .unwrap();
 
         // Record two apply events for the same firmware
-        let record1 = RackFirmwareApplyHistory::record(
-            &mut *txn,
-            "fw-001",
-            "rack-a",
-            "prod",
-        )
-        .await
-        .unwrap();
+        let record1 = RackFirmwareApplyHistory::record(&mut txn, "fw-001", "rack-a", "prod")
+            .await
+            .unwrap();
         assert_eq!(record1.firmware_id, "fw-001");
         assert_eq!(record1.rack_id, "rack-a");
         assert_eq!(record1.firmware_type, "prod");
 
-        let record2 = RackFirmwareApplyHistory::record(
-            &mut *txn,
-            "fw-001",
-            "rack-b",
-            "dev",
-        )
-        .await
-        .unwrap();
+        let record2 = RackFirmwareApplyHistory::record(&mut txn, "fw-001", "rack-b", "dev")
+            .await
+            .unwrap();
         assert_eq!(record2.rack_id, "rack-b");
         assert_eq!(record2.firmware_type, "dev");
 
         // List all history — should return both, newest first
-        let all = RackFirmwareApplyHistory::list(&mut *txn, None)
+        let all = RackFirmwareApplyHistory::list(&mut txn, None)
             .await
             .unwrap();
         assert_eq!(all.len(), 2);
@@ -311,13 +297,13 @@ mod tests {
         assert!(all[1].1);
 
         // List filtered by firmware_id
-        let filtered = RackFirmwareApplyHistory::list(&mut *txn, Some("fw-001"))
+        let filtered = RackFirmwareApplyHistory::list(&mut txn, Some("fw-001"))
             .await
             .unwrap();
         assert_eq!(filtered.len(), 2);
 
         // Filter by a non-existent firmware_id
-        let empty = RackFirmwareApplyHistory::list(&mut *txn, Some("fw-999"))
+        let empty = RackFirmwareApplyHistory::list(&mut txn, Some("fw-999"))
             .await
             .unwrap();
         assert!(empty.is_empty());
@@ -328,35 +314,30 @@ mod tests {
         let mut txn = pool.begin().await.unwrap();
 
         // Create firmware and mark available
-        RackFirmware::create(
-            &mut *txn,
-            "fw-002",
-            json!({"Id": "fw-002"}),
-            None,
-        )
-        .await
-        .unwrap();
-        RackFirmware::set_available(&mut *txn, "fw-002", true)
+        RackFirmware::create(&mut txn, "fw-002", json!({"Id": "fw-002"}), None)
+            .await
+            .unwrap();
+        RackFirmware::set_available(&mut txn, "fw-002", true)
             .await
             .unwrap();
 
         // Record an apply
-        RackFirmwareApplyHistory::record(&mut *txn, "fw-002", "rack-a", "prod")
+        RackFirmwareApplyHistory::record(&mut txn, "fw-002", "rack-a", "prod")
             .await
             .unwrap();
 
         // Verify available = true
-        let before = RackFirmwareApplyHistory::list(&mut *txn, Some("fw-002"))
+        let before = RackFirmwareApplyHistory::list(&mut txn, Some("fw-002"))
             .await
             .unwrap();
         assert_eq!(before.len(), 1);
         assert!(before[0].1);
 
         // Delete the firmware
-        RackFirmware::delete(&mut *txn, "fw-002").await.unwrap();
+        RackFirmware::delete(&mut txn, "fw-002").await.unwrap();
 
         // History entry still exists but firmware_available is now false
-        let after = RackFirmwareApplyHistory::list(&mut *txn, Some("fw-002"))
+        let after = RackFirmwareApplyHistory::list(&mut txn, Some("fw-002"))
             .await
             .unwrap();
         assert_eq!(after.len(), 1);
@@ -368,11 +349,11 @@ mod tests {
         let mut txn = pool.begin().await.unwrap();
 
         // Record history for a firmware_id that was never created
-        RackFirmwareApplyHistory::record(&mut *txn, "fw-ghost", "rack-a", "prod")
+        RackFirmwareApplyHistory::record(&mut txn, "fw-ghost", "rack-a", "prod")
             .await
             .unwrap();
 
-        let history = RackFirmwareApplyHistory::list(&mut *txn, None)
+        let history = RackFirmwareApplyHistory::list(&mut txn, None)
             .await
             .unwrap();
         assert_eq!(history.len(), 1);
