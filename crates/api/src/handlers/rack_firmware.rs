@@ -1044,9 +1044,10 @@ pub async fn apply(
         "Found devices in rack"
     );
 
-    let rms_client = api.rms_client.as_ref().ok_or_else(|| {
-        CarbideError::FailedPrecondition("RMS client not configured".to_string())
-    })?;
+    let rms_client = api
+        .rms_client
+        .as_ref()
+        .ok_or_else(|| CarbideError::FailedPrecondition("RMS client not configured".to_string()))?;
 
     // Build firmware targets per node type from the firmware config lookup table.
     // device_type_configs: (lookup_key, RMS NodeType, display_name, has_devices, activate)
@@ -1140,14 +1141,13 @@ pub async fn apply(
 
     // Compute trays: resolve MachineId -> BMC IP via machine_topologies
     if has_compute_trays {
-        let bmc_pairs = db::machine_topology::find_machine_bmc_pairs_by_machine_id(
-            &mut *conn,
-            machine_ids,
-        )
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Failed to resolve compute tray BMC endpoints: {}", e),
-        })?;
+        #[allow(clippy::explicit_auto_deref)]
+        let bmc_pairs =
+            db::machine_topology::find_machine_bmc_pairs_by_machine_id(&mut *conn, machine_ids)
+                .await
+                .map_err(|e| CarbideError::Internal {
+                    message: format!("Failed to resolve compute tray BMC endpoints: {}", e),
+                })?;
         for (machine_id, bmc_ip) in bmc_pairs {
             let Some(ip) = bmc_ip else {
                 tracing::warn!(machine_id = %machine_id, "Compute tray has no BMC IP, skipping");
@@ -1172,12 +1172,14 @@ pub async fn apply(
 
     // Power shelves: resolve PowerShelfId -> BMC MAC + IP
     if has_power_shelves {
-        let ps_endpoints =
-            db::power_shelf::find_power_shelf_endpoints_by_ids(&mut *conn, &power_shelf_ids)
-                .await
-                .map_err(|e| CarbideError::Internal {
-                    message: format!("Failed to resolve power shelf BMC endpoints: {}", e),
-                })?;
+        let ps_endpoints = db::power_shelf::find_power_shelf_endpoints_by_ids(
+            &api.database_connection,
+            &power_shelf_ids,
+        )
+        .await
+        .map_err(|e| CarbideError::Internal {
+            message: format!("Failed to resolve power shelf BMC endpoints: {}", e),
+        })?;
         for row in ps_endpoints {
             devices.push(librms::protos::rack_manager::NewNodeInfo {
                 node_id: row.power_shelf_id.to_string(),
@@ -1199,7 +1201,7 @@ pub async fn apply(
     // Switches: resolve SwitchId -> BMC MAC + IP
     if has_switches {
         let sw_endpoints =
-            db::switch::find_bmc_info_by_switch_ids(&mut *conn, &switch_ids)
+            db::switch::find_bmc_info_by_switch_ids(&api.database_connection, &switch_ids)
                 .await
                 .map_err(|e| CarbideError::Internal {
                     message: format!("Failed to resolve switch BMC endpoints: {}", e),
@@ -1322,8 +1324,9 @@ pub async fn apply(
         .acquire()
         .await
         .map_err(|e| CarbideError::from(DatabaseError::new("acquire for apply history", e)))?;
+    #[allow(clippy::explicit_auto_deref)]
     db::rack_firmware::record_apply_history(
-        &mut conn,
+        &mut *conn,
         &req.firmware_id,
         &rack_id_str,
         &req.firmware_type,
@@ -1496,8 +1499,9 @@ pub async fn get_history(
         .await
         .map_err(|e| CarbideError::from(DatabaseError::new("acquire for history", e)))?;
 
+    #[allow(clippy::explicit_auto_deref)]
     let records =
-        db::rack_firmware::list_apply_history(&mut conn, firmware_id_filter, &req.rack_ids)
+        db::rack_firmware::list_apply_history(&mut *conn, firmware_id_filter, &req.rack_ids)
             .await
             .map_err(CarbideError::from)?;
 

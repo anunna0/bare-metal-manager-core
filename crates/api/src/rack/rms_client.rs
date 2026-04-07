@@ -181,12 +181,6 @@ pub mod test_support {
         ) -> Result<rms::GetNodeFirmwareInventoryResponse, RackManagerError> {
             Ok(rms::GetNodeFirmwareInventoryResponse::default())
         }
-        async fn update_node_firmware(
-            &self,
-            _cmd: rms::UpdateNodeFirmwareRequest,
-        ) -> Result<rms::UpdateNodeFirmwareResponse, RackManagerError> {
-            Ok(rms::UpdateNodeFirmwareResponse::default())
-        }
         async fn get_node_device_info(
             &self,
             _cmd: rms::GetNodeDeviceInfoRequest,
