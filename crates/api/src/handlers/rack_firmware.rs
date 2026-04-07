@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -982,18 +983,50 @@ pub async fn apply(
             serde_json::json!({})
         });
 
-    let rack = db::rack::get(&api.database_connection, &rack_id)
+    // Verify rack exists
+    let _rack = db::rack::get(&api.database_connection, &rack_id)
         .await
         .map_err(|e| CarbideError::Internal {
             message: format!("Failed to get rack: {}", e),
         })?;
 
-    // Convert rack to proto to get device IDs
-    let rack_proto: rpc::forge::Rack = rack.into();
+    // Query device IDs from the database by rack_id
+    let mut conn = api
+        .database_connection
+        .acquire()
+        .await
+        .map_err(|e| CarbideError::from(DatabaseError::new("acquire for device lookup", e)))?;
 
-    let has_compute_trays = !rack_proto.compute_trays.is_empty();
-    let has_power_shelves = !rack_proto.power_shelves.is_empty();
-    let has_switches = !rack_proto.expected_nvlink_switches.is_empty();
+    let machine_ids: Vec<carbide_uuid::machine::MachineId> =
+        sqlx::query_as("SELECT id FROM machines WHERE rack_id = $1 AND deleted IS NULL")
+            .bind(&rack_id)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(|e| CarbideError::Internal {
+                message: format!("Failed to query machines for rack: {}", e),
+            })?;
+
+    let switch_ids: Vec<carbide_uuid::switch::SwitchId> =
+        sqlx::query_as("SELECT id FROM switches WHERE rack_id = $1 AND deleted IS NULL")
+            .bind(&rack_id)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(|e| CarbideError::Internal {
+                message: format!("Failed to query switches for rack: {}", e),
+            })?;
+
+    let power_shelf_ids: Vec<carbide_uuid::power_shelf::PowerShelfId> =
+        sqlx::query_as("SELECT id FROM power_shelves WHERE rack_id = $1 AND deleted IS NULL")
+            .bind(&rack_id)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(|e| CarbideError::Internal {
+                message: format!("Failed to query power shelves for rack: {}", e),
+            })?;
+
+    let has_compute_trays = !machine_ids.is_empty();
+    let has_power_shelves = !power_shelf_ids.is_empty();
+    let has_switches = !switch_ids.is_empty();
 
     if !has_compute_trays && !has_power_shelves && !has_switches {
         return Err(CarbideError::FailedPrecondition(format!(
@@ -1005,46 +1038,43 @@ pub async fn apply(
 
     tracing::info!(
         rack_id = %rack_id,
-        compute_trays = rack_proto.compute_trays.len(),
-        power_shelves = rack_proto.power_shelves.len(),
-        switches = rack_proto.expected_nvlink_switches.len(),
+        compute_trays = machine_ids.len(),
+        power_shelves = power_shelf_ids.len(),
+        switches = switch_ids.len(),
         "Found devices in rack"
     );
 
-    // Each device type is updated via a single update_firmware_by_node_type_async
-    // call — RMS handles distributing to all nodes of that type in the rack.
-    let mut device_results = Vec::new();
-    let mut successful_updates = 0;
-    let mut failed_updates = 0;
+    let rms_client = api.rms_client.as_ref().ok_or_else(|| {
+        CarbideError::FailedPrecondition("RMS client not configured".to_string())
+    })?;
 
-    // Device types to update: (lookup_table_key, RMS NodeType, display_name, has_devices, activate)
-    // activate=true for compute trays (Redfish activation after flash).
-    // activate=false for switches (activation is handled internally via power cycle).
-    let device_types: &[(&str, i32, &str, bool, bool)] = &[
+    // Build firmware targets per node type from the firmware config lookup table.
+    // device_type_configs: (lookup_key, RMS NodeType, display_name, has_devices, activate)
+    let device_type_configs: &[(&str, i32, &str, bool)] = &[
         (
             "Compute Node",
             librms::protos::rack_manager::NodeType::Compute as i32,
             "Compute Node",
             has_compute_trays,
-            true,
         ),
         (
             "Power Shelf",
             librms::protos::rack_manager::NodeType::Powershelf as i32,
             "Power Shelf",
             has_power_shelves,
-            false,
         ),
         (
             "Switch Tray",
             librms::protos::rack_manager::NodeType::Switch as i32,
             "Switch",
             has_switches,
-            false,
         ),
     ];
 
-    for &(lookup_key, node_type, display_name, has_devices, activate) in device_types {
+    let mut firmware_targets_map: HashMap<i32, librms::protos::rack_manager::FirmwareTargetList> =
+        HashMap::new();
+
+    for &(lookup_key, node_type, display_name, has_devices) in device_type_configs {
         if !has_devices {
             continue;
         }
@@ -1052,7 +1082,6 @@ pub async fn apply(
         let mut firmware_components =
             find_firmware_components_for_device(&parsed_components, lookup_key, &req.firmware_type);
 
-        // Sort components into the required flashing order for this device type
         let flash_order = get_firmware_flash_order(lookup_key);
         firmware_components.sort_by_key(|(_, _, target)| {
             flash_order
@@ -1065,133 +1094,216 @@ pub async fn apply(
             tracing::warn!(
                 rack_id = %rack_id,
                 device_type = %display_name,
-                "No matching firmware found in config"
+                "No matching firmware found in config, skipping device type"
             );
-            device_results.push(DeviceUpdateResult {
-                device_id: rack_id.to_string(),
-                device_type: display_name.to_string(),
-                success: false,
-                message: format!("No matching firmware found in config for {}", display_name),
-                job_id: String::new(),
-                node_jobs: vec![],
-            });
-            failed_updates += 1;
             continue;
         }
 
-        let Some(rms_client) = &api.rms_client else {
-            tracing::warn!(
-                rack_id = %rack_id,
-                device_type = %display_name,
-                "RMS client not configured, cannot update firmware"
-            );
-            device_results.push(DeviceUpdateResult {
-                device_id: rack_id.to_string(),
-                device_type: display_name.to_string(),
-                success: false,
-                message: "RMS client not configured".to_string(),
-                job_id: String::new(),
-                node_jobs: vec![],
-            });
-            failed_updates += 1;
-            continue;
-        };
-
-        // Build FirmwareTarget entries from the lookup table
-        let firmware_targets: Vec<librms::protos::rack_manager::FirmwareTarget> =
-            firmware_components
-                .iter()
-                .map(|(_component_name, filename, target)| {
-                    let full_firmware_path = format!(
-                        "/forge-boot-artifacts/blobs/internal/fw/rack_firmware/{}/{}",
-                        req.firmware_id, filename
-                    );
-                    librms::protos::rack_manager::FirmwareTarget {
-                        target: target.clone(),
-                        filename: full_firmware_path,
-                    }
-                })
-                .collect();
+        let targets: Vec<librms::protos::rack_manager::FirmwareTarget> = firmware_components
+            .iter()
+            .map(|(_component_name, filename, target)| {
+                let full_firmware_path = format!(
+                    "/forge-boot-artifacts/blobs/internal/fw/rack_firmware/{}/{}",
+                    req.firmware_id, filename
+                );
+                librms::protos::rack_manager::FirmwareTarget {
+                    target: target.clone(),
+                    filename: full_firmware_path,
+                }
+            })
+            .collect();
 
         tracing::info!(
             rack_id = %rack_id,
             device_type = %display_name,
-            firmware_target_count = firmware_targets.len(),
-            targets = ?firmware_targets.iter().map(|t| &t.target).collect::<Vec<_>>(),
-            "Applying firmware via async batch API"
+            firmware_target_count = targets.len(),
+            targets = ?targets.iter().map(|t| &t.target).collect::<Vec<_>>(),
+            "Prepared firmware targets for device type"
         );
 
-        let rms_request = librms::protos::rack_manager::UpdateFirmwareByNodeTypeRequest {
-            metadata: None,
+        firmware_targets_map.insert(
             node_type,
-            filename: String::new(),
-            target: String::new(),
-            rack_id: rack_id.to_string(),
-            firmware_targets,
-            activate,
-        };
+            librms::protos::rack_manager::FirmwareTargetList { targets },
+        );
+    }
 
-        match rms_client
-            .update_firmware_by_node_type_async(rms_request)
-            .await
-        {
-            Ok(response) => {
-                let success =
-                    response.status == librms::protos::rack_manager::ReturnCode::Success as i32;
+    if firmware_targets_map.is_empty() {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "No matching firmware found in config for any device type in rack '{}'",
+            rack_id
+        ))
+        .into());
+    }
 
-                if success {
-                    successful_updates += 1;
-                } else {
-                    failed_updates += 1;
-                }
+    // Resolve BMC endpoints for all devices and build the NodeSet.
+    let mut devices = Vec::new();
 
-                let node_jobs: Vec<NodeJobInfo> = response
-                    .node_jobs
-                    .iter()
-                    .map(|j| NodeJobInfo {
-                        node_id: j.node_id.clone(),
-                        job_id: j.job_id.clone(),
-                    })
-                    .collect();
+    // Compute trays: resolve MachineId -> BMC IP via machine_topologies
+    if has_compute_trays {
+        let bmc_pairs = db::machine_topology::find_machine_bmc_pairs_by_machine_id(
+            &mut *conn,
+            machine_ids,
+        )
+        .await
+        .map_err(|e| CarbideError::Internal {
+            message: format!("Failed to resolve compute tray BMC endpoints: {}", e),
+        })?;
+        for (machine_id, bmc_ip) in bmc_pairs {
+            let Some(ip) = bmc_ip else {
+                tracing::warn!(machine_id = %machine_id, "Compute tray has no BMC IP, skipping");
+                continue;
+            };
+            devices.push(librms::protos::rack_manager::NewNodeInfo {
+                node_id: machine_id.to_string(),
+                rack_id: rack_id.to_string(),
+                r#type: Some(librms::protos::rack_manager::NodeType::Compute as i32),
+                bmc_endpoint: Some(librms::protos::rack_manager::BmcEndpoint {
+                    interface: Some(librms::protos::rack_manager::NetworkInterface {
+                        ip_address: ip,
+                        mac_address: String::new(),
+                    }),
+                    port: 443,
+                    credentials: None,
+                }),
+                host_endpoint: None,
+            });
+        }
+    }
 
-                for node_job in &response.node_jobs {
-                    tracing::info!(
-                        device_type = %display_name,
-                        node_id = %node_job.node_id,
-                        job_id = %node_job.job_id,
-                        "Firmware update job created"
-                    );
-                }
+    // Power shelves: resolve PowerShelfId -> BMC MAC + IP
+    if has_power_shelves {
+        let ps_endpoints =
+            db::power_shelf::find_power_shelf_endpoints_by_ids(&mut *conn, &power_shelf_ids)
+                .await
+                .map_err(|e| CarbideError::Internal {
+                    message: format!("Failed to resolve power shelf BMC endpoints: {}", e),
+                })?;
+        for row in ps_endpoints {
+            devices.push(librms::protos::rack_manager::NewNodeInfo {
+                node_id: row.power_shelf_id.to_string(),
+                rack_id: rack_id.to_string(),
+                r#type: Some(librms::protos::rack_manager::NodeType::Powershelf as i32),
+                bmc_endpoint: Some(librms::protos::rack_manager::BmcEndpoint {
+                    interface: Some(librms::protos::rack_manager::NetworkInterface {
+                        ip_address: row.pmc_ip.to_string(),
+                        mac_address: row.pmc_mac.to_string(),
+                    }),
+                    port: 443,
+                    credentials: None,
+                }),
+                host_endpoint: None,
+            });
+        }
+    }
 
-                device_results.push(DeviceUpdateResult {
-                    device_id: rack_id.to_string(),
-                    device_type: display_name.to_string(),
-                    success,
-                    message: format!(
-                        "Async firmware update initiated for {} nodes: {}",
-                        response.total_nodes, response.message
-                    ),
-                    job_id: response.job_id,
-                    node_jobs,
-                });
-            }
-            Err(e) => {
-                tracing::warn!(
-                    rack_id = %rack_id,
-                    device_type = %display_name,
-                    error = %e,
-                    "Failed to initiate async firmware update"
+    // Switches: resolve SwitchId -> BMC MAC + IP
+    if has_switches {
+        let sw_endpoints =
+            db::switch::find_bmc_info_by_switch_ids(&mut *conn, &switch_ids)
+                .await
+                .map_err(|e| CarbideError::Internal {
+                    message: format!("Failed to resolve switch BMC endpoints: {}", e),
+                })?;
+        for row in sw_endpoints {
+            devices.push(librms::protos::rack_manager::NewNodeInfo {
+                node_id: row.switch_id.to_string(),
+                rack_id: rack_id.to_string(),
+                r#type: Some(librms::protos::rack_manager::NodeType::Switch as i32),
+                bmc_endpoint: Some(librms::protos::rack_manager::BmcEndpoint {
+                    interface: Some(librms::protos::rack_manager::NetworkInterface {
+                        ip_address: row.bmc_ip.to_string(),
+                        mac_address: row.bmc_mac.to_string(),
+                    }),
+                    port: 443,
+                    credentials: None,
+                }),
+                host_endpoint: None,
+            });
+        }
+    }
+
+    if devices.is_empty() {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "Could not resolve BMC endpoints for any devices in rack '{}'",
+            rack_id
+        ))
+        .into());
+    }
+
+    tracing::info!(
+        rack_id = %rack_id,
+        device_count = devices.len(),
+        firmware_types = ?firmware_targets_map.keys().collect::<Vec<_>>(),
+        "Sending UpdateFirmwareByDeviceList request"
+    );
+
+    let rms_request = librms::protos::rack_manager::UpdateFirmwareByDeviceListRequest {
+        metadata: None,
+        nodes: Some(librms::protos::rack_manager::NodeSet { devices }),
+        firmware_targets: firmware_targets_map,
+        activate: true,
+        force_update: false,
+    };
+
+    let mut device_results = Vec::new();
+    let mut successful_updates: i32 = 0;
+    let mut failed_updates: i32 = 0;
+
+    match rms_client.update_firmware_by_device_list(rms_request).await {
+        Ok(response) => {
+            let success =
+                response.status == librms::protos::rack_manager::ReturnCode::Success as i32;
+
+            let node_jobs: Vec<NodeJobInfo> = response
+                .node_jobs
+                .iter()
+                .map(|j| NodeJobInfo {
+                    node_id: j.node_id.clone(),
+                    job_id: j.job_id.clone(),
+                })
+                .collect();
+
+            for node_job in &response.node_jobs {
+                tracing::info!(
+                    node_id = %node_job.node_id,
+                    job_id = %node_job.job_id,
+                    "Firmware update job created"
                 );
-                device_results.push(DeviceUpdateResult {
-                    device_id: rack_id.to_string(),
-                    device_type: display_name.to_string(),
-                    success: false,
-                    message: format!("RMS API Error: {}", e),
-                    job_id: String::new(),
-                    node_jobs: vec![],
-                });
-                failed_updates += 1;
             }
+
+            if success {
+                successful_updates = 1;
+            } else {
+                failed_updates = 1;
+            }
+
+            device_results.push(DeviceUpdateResult {
+                device_id: rack_id.to_string(),
+                device_type: "All".to_string(),
+                success,
+                message: format!(
+                    "Firmware update initiated for {} nodes: {}",
+                    response.total_nodes, response.message
+                ),
+                job_id: response.job_id,
+                node_jobs,
+            });
+        }
+        Err(e) => {
+            tracing::warn!(
+                rack_id = %rack_id,
+                error = %e,
+                "Failed to initiate firmware update via device list"
+            );
+            failed_updates = 1;
+            device_results.push(DeviceUpdateResult {
+                device_id: rack_id.to_string(),
+                device_type: "All".to_string(),
+                success: false,
+                message: format!("RMS API Error: {}", e),
+                job_id: String::new(),
+                node_jobs: vec![],
+            });
         }
     }
 
@@ -1200,7 +1312,6 @@ pub async fn apply(
         firmware_id = %req.firmware_id,
         successful = successful_updates,
         failed = failed_updates,
-        total = device_results.len(),
         "Firmware apply operation completed"
     );
 

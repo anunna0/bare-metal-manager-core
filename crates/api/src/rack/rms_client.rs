@@ -121,11 +121,23 @@ pub mod test_support {
             // just like a real RMS would.
             let mut registered = self.registered_nodes.lock().await;
             for node in cmd.node_info {
+                let (ip, mac, port) = node
+                    .bmc_endpoint
+                    .as_ref()
+                    .map(|bmc| {
+                        let iface = bmc.interface.as_ref();
+                        (
+                            iface.map(|i| i.ip_address.clone()).unwrap_or_default(),
+                            iface.map(|i| i.mac_address.clone()).unwrap_or_default(),
+                            bmc.port,
+                        )
+                    })
+                    .unwrap_or_default();
                 registered.push(librms::protos::rack_manager::NodeInventoryInfo {
                     node_id: node.node_id.clone(),
-                    ip_address: node.ip_address.clone(),
-                    port: node.port,
-                    mac_address: node.mac_address.clone(),
+                    ip_address: ip,
+                    port,
+                    mac_address: mac,
                     rack_id: node.rack_id.clone(),
                     r#type: node.r#type.unwrap_or(0),
                     ..Default::default()
@@ -175,11 +187,17 @@ pub mod test_support {
         ) -> Result<rms::UpdateNodeFirmwareResponse, RackManagerError> {
             Ok(rms::UpdateNodeFirmwareResponse::default())
         }
-        async fn update_firmware_by_node_type(
+        async fn get_node_device_info(
             &self,
-            _cmd: rms::UpdateFirmwareByNodeTypeRequest,
-        ) -> Result<rms::UpdateFirmwareByNodeTypeResponse, RackManagerError> {
-            Ok(rms::UpdateFirmwareByNodeTypeResponse::default())
+            _cmd: rms::GetNodeDeviceInfoRequest,
+        ) -> Result<rms::GetNodeDeviceInfoResponse, RackManagerError> {
+            Ok(rms::GetNodeDeviceInfoResponse::default())
+        }
+        async fn get_device_info_by_node_type(
+            &self,
+            _cmd: rms::GetDeviceInfoByNodeTypeRequest,
+        ) -> Result<rms::GetDeviceInfoByNodeTypeResponse, RackManagerError> {
+            Ok(rms::GetDeviceInfoByNodeTypeResponse::default())
         }
         async fn get_rack_firmware_inventory(
             &self,
@@ -291,6 +309,12 @@ pub mod test_support {
             _cmd: rms::UpdateFirmwareByNodeTypeRequest,
         ) -> Result<rms::UpdateFirmwareByNodeTypeAsyncResponse, RackManagerError> {
             Ok(rms::UpdateFirmwareByNodeTypeAsyncResponse::default())
+        }
+        async fn update_firmware_by_device_list(
+            &self,
+            _cmd: rms::UpdateFirmwareByDeviceListRequest,
+        ) -> Result<rms::UpdateFirmwareByDeviceListResponse, RackManagerError> {
+            Ok(rms::UpdateFirmwareByDeviceListResponse::default())
         }
         async fn get_firmware_job_status(
             &self,

@@ -776,17 +776,18 @@ impl SiteExplorer {
         if let Some(rms_client) = &self.rms_client {
             if let Some(ref rack_id) = expected_shelf.rack_id {
                 let new_node_info = NewNodeInfo {
-                    rack_id: rack_id.to_string(),
                     node_id: power_shelf_id.to_string(),
-                    mac_address: expected_shelf.bmc_mac_address.to_string(),
-                    ip_address: explored_endpoint.address.to_string(),
-                    port: 443,
-                    username: None,
-                    password: None,
+                    rack_id: rack_id.to_string(),
                     r#type: Some(RmsNodeType::Powershelf.into()),
-                    vault_path: String::new(),
-                    host_ip_addresses: vec![],
-                    host_mac_addresses: vec![],
+                    bmc_endpoint: Some(librms::protos::rack_manager::BmcEndpoint {
+                        interface: Some(librms::protos::rack_manager::NetworkInterface {
+                            ip_address: explored_endpoint.address.to_string(),
+                            mac_address: expected_shelf.bmc_mac_address.to_string(),
+                        }),
+                        port: 443,
+                        credentials: None,
+                    }),
+                    host_endpoint: None,
                 };
                 if let Err(e) = rms::add_node_to_rms(rms_client.as_ref(), new_node_info).await {
                     tracing::warn!(
