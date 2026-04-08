@@ -990,35 +990,65 @@ pub async fn apply(
             message: format!("Failed to get rack: {}", e),
         })?;
 
-    // Query device IDs from the database by rack_id
-    let mut conn = api
-        .database_connection
-        .acquire()
-        .await
-        .map_err(|e| CarbideError::from(DatabaseError::new("acquire for device lookup", e)))?;
+    // Query device IDs and BMC endpoints from the database by rack_id.
+    // All DB work is done upfront so the connection is dropped before async
+    // credential lookups and the RMS call (avoids txn-held-across-await).
+    let (machine_bmc_endpoints, switch_endpoints) = {
+        let mut conn = api
+            .database_connection
+            .acquire()
+            .await
+            .map_err(|e| CarbideError::from(DatabaseError::new("acquire for device lookup", e)))?;
 
-    let machine_ids: Vec<carbide_uuid::machine::MachineId> =
-        sqlx::query_as("SELECT id FROM machines WHERE rack_id = $1 AND deleted IS NULL")
-            .bind(&rack_id)
-            .fetch_all(&mut *conn)
+        let machine_ids: Vec<carbide_uuid::machine::MachineId> =
+            sqlx::query_as("SELECT id FROM machines WHERE rack_id = $1 AND deleted IS NULL")
+                .bind(&rack_id)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|e| CarbideError::Internal {
+                    message: format!("Failed to query machines for rack: {}", e),
+                })?;
+
+        let switch_ids: Vec<carbide_uuid::switch::SwitchId> =
+            sqlx::query_as("SELECT id FROM switches WHERE rack_id = $1 AND deleted IS NULL")
+                .bind(&rack_id)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|e| CarbideError::Internal {
+                    message: format!("Failed to query switches for rack: {}", e),
+                })?;
+
+        // Power shelf firmware updates are not yet supported — skip querying them.
+
+        #[allow(clippy::explicit_auto_deref)]
+        let machine_bmc = if machine_ids.is_empty() {
+            vec![]
+        } else {
+            db::machine_topology::find_machine_bmc_endpoints_by_machine_id(
+                &mut *conn,
+                machine_ids,
+            )
             .await
             .map_err(|e| CarbideError::Internal {
-                message: format!("Failed to query machines for rack: {}", e),
-            })?;
+                message: format!("Failed to resolve compute tray BMC endpoints: {}", e),
+            })?
+        };
 
-    let switch_ids: Vec<carbide_uuid::switch::SwitchId> =
-        sqlx::query_as("SELECT id FROM switches WHERE rack_id = $1 AND deleted IS NULL")
-            .bind(&rack_id)
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(|e| CarbideError::Internal {
-                message: format!("Failed to query switches for rack: {}", e),
-            })?;
+        let switch_ep = if switch_ids.is_empty() {
+            vec![]
+        } else {
+            db::switch::find_switch_endpoints_by_ids(&api.database_connection, &switch_ids)
+                .await
+                .map_err(|e| CarbideError::Internal {
+                    message: format!("Failed to resolve switch endpoints: {}", e),
+                })?
+        };
 
-    // Power shelf firmware updates are not yet supported — skip querying them.
+        (machine_bmc, switch_ep)
+    }; // conn dropped here
 
-    let has_compute_trays = !machine_ids.is_empty();
-    let has_switches = !switch_ids.is_empty();
+    let has_compute_trays = !machine_bmc_endpoints.is_empty();
+    let has_switches = !switch_endpoints.is_empty();
 
     if !has_compute_trays && !has_switches {
         return Err(CarbideError::FailedPrecondition(format!(
@@ -1030,8 +1060,8 @@ pub async fn apply(
 
     tracing::info!(
         rack_id = %rack_id,
-        compute_trays = machine_ids.len(),
-        switches = switch_ids.len(),
+        compute_trays = machine_bmc_endpoints.len(),
+        switches = switch_endpoints.len(),
         "Found devices in rack"
     );
 
@@ -1125,16 +1155,9 @@ pub async fn apply(
     let mut devices = Vec::new();
     let credential_reader = api.credential_manager.as_ref();
 
-    // Compute trays: resolve MachineId -> BMC IP + MAC, then look up BMC credentials
+    // Compute trays: look up BMC credentials for each resolved endpoint
     if has_compute_trays {
-        #[allow(clippy::explicit_auto_deref)]
-        let bmc_endpoints =
-            db::machine_topology::find_machine_bmc_endpoints_by_machine_id(&mut *conn, machine_ids)
-                .await
-                .map_err(|e| CarbideError::Internal {
-                    message: format!("Failed to resolve compute tray BMC endpoints: {}", e),
-                })?;
-        for (machine_id, bmc_ip, bmc_mac) in bmc_endpoints {
+        for (machine_id, bmc_ip, bmc_mac) in machine_bmc_endpoints {
             let (Some(ip), Some(mac)) = (bmc_ip, bmc_mac) else {
                 tracing::warn!(machine_id = %machine_id, "Compute tray missing BMC IP or MAC, skipping");
                 continue;
@@ -1185,15 +1208,9 @@ pub async fn apply(
         }
     }
 
-    // Switches: resolve SwitchId -> BMC + NVOS endpoints, then look up host (NVOS) credentials
+    // Switches: look up BMC + NVOS credentials for each resolved endpoint
     if has_switches {
-        let sw_endpoints =
-            db::switch::find_switch_endpoints_by_ids(&api.database_connection, &switch_ids)
-                .await
-                .map_err(|e| CarbideError::Internal {
-                    message: format!("Failed to resolve switch endpoints: {}", e),
-                })?;
-        for row in sw_endpoints {
+        for row in switch_endpoints {
             let Some(nvos_ip) = row.nvos_ip else {
                 tracing::warn!(switch_id = %row.switch_id, "Switch has no NVOS IP, skipping");
                 continue;
