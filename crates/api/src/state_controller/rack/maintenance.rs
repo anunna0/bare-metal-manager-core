@@ -400,10 +400,13 @@ pub async fn handle_maintenance(
                 };
 
                 if !default_firmware.available {
-                    return Ok(StateHandlerOutcome::wait(format!(
-                        "waiting for default rack firmware '{}' to become available",
-                        default_firmware.id
-                    )));
+                    return Ok(skip_firmware_upgrade_outcome(
+                        id,
+                        format!(
+                            "default rack firmware '{}' exists but is not available",
+                            default_firmware.id
+                        ),
+                    ));
                 }
 
                 let inventory = load_rack_firmware_inventory(

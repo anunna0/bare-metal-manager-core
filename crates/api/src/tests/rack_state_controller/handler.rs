@@ -36,9 +36,10 @@ use crate::state_controller::rack::handler::RackStateHandler;
 use crate::state_controller::state_handler::{
     StateHandler, StateHandlerContext, StateHandlerOutcome,
 };
+use crate::tests::common::api_fixtures::managed_host::ManagedHostConfig;
+use crate::tests::common::api_fixtures::site_explorer::new_host;
 use crate::tests::common::api_fixtures::{
     TestEnv, TestEnvOverrides, create_test_env_with_overrides, get_config,
-    managed_host::ManagedHostConfig, site_explorer::new_host,
 };
 
 fn test_capabilities() -> RackCapabilitiesSet {
@@ -161,6 +162,7 @@ async fn insert_default_rack_firmware(
     pool: &sqlx::PgPool,
     firmware_id: &str,
     rack_hardware_type: RackHardwareType,
+    available: bool,
 ) {
     let mut txn = pool.begin().await.unwrap();
     db::rack_firmware::create(
@@ -172,9 +174,11 @@ async fn insert_default_rack_firmware(
     )
     .await
     .unwrap();
-    db::rack_firmware::set_available(&mut txn, firmware_id, true)
-        .await
-        .unwrap();
+    if available {
+        db::rack_firmware::set_available(&mut txn, firmware_id, true)
+            .await
+            .unwrap();
+    }
     db::rack_firmware::set_default(&mut txn, firmware_id)
         .await
         .unwrap();
@@ -922,6 +926,85 @@ async fn test_firmware_upgrade_start_without_default_skips_to_configure_nmx_clus
     Ok(())
 }
 
+/// test_firmware_upgrade_start_with_unavailable_default_skips_to_configure_nmx_cluster
+/// verifies that maintenance skips firmware flashing when a default firmware
+/// exists for the hardware type but is not yet available.
+#[crate::sqlx_test]
+async fn test_firmware_upgrade_start_with_unavailable_default_skips_to_configure_nmx_cluster(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config_with_rack_types()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (rack_id, host) = create_single_compute_rack(&env, &pool).await?;
+    insert_default_rack_firmware(
+        &pool,
+        "fw-default-unavailable",
+        RackHardwareType::any(),
+        false,
+    )
+    .await;
+    let mut rack = db_rack::get(&pool, &rack_id).await?;
+
+    let handler_instance = RackStateHandler::default();
+    let mut services = env.state_handler_services();
+    let mut metrics = ();
+    let mut db_writes = DbWriteBatch::default();
+    let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        services: &mut services,
+        metrics: &mut metrics,
+        pending_db_writes: &mut db_writes,
+    };
+
+    let fw_state = RackState::Maintenance {
+        maintenance_state: RackMaintenanceState::FirmwareUpgrade {
+            rack_firmware_upgrade: FirmwareUpgradeState::Start,
+        },
+    };
+    let mut outcome = handler_instance
+        .handle_object_state(&rack_id, &mut rack, &fw_state, &mut ctx)
+        .await?;
+    if let Some(txn) = outcome.take_transaction() {
+        txn.commit().await?;
+    }
+
+    match outcome {
+        StateHandlerOutcome::Transition { next_state, .. } => {
+            assert!(
+                matches!(
+                    next_state,
+                    RackState::Maintenance {
+                        maintenance_state: RackMaintenanceState::ConfigureNmxCluster,
+                    }
+                ),
+                "FirmwareUpgrade(Start) should skip to ConfigureNmxCluster when default firmware is unavailable, got {:?}",
+                next_state
+            );
+        }
+        other => panic!(
+            "Expected Transition, got {:?}",
+            std::mem::discriminant(&other)
+        ),
+    }
+
+    assert!(env.rms_sim.submitted_firmware_requests().await.is_empty());
+    let machine = db::machine::find_one(
+        &pool,
+        &host.host_snapshot.id,
+        model::machine::machine_search_config::MachineSearchConfig::default(),
+    )
+    .await?
+    .expect("machine should exist");
+    assert!(machine.host_reprovision_requested.is_none());
+
+    Ok(())
+}
+
 /// test_firmware_upgrade_start_transitions_to_wait_for_complete verifies that
 /// Maintenance::FirmwareUpgrade(Start) transitions to WaitForComplete.
 #[crate::sqlx_test]
@@ -937,7 +1020,7 @@ async fn test_firmware_upgrade_start_transitions_to_wait_for_complete(
     )
     .await;
     let (rack_id, host) = create_single_compute_rack(&env, &pool).await?;
-    insert_default_rack_firmware(&pool, "fw-default", RackHardwareType::any()).await;
+    insert_default_rack_firmware(&pool, "fw-default", RackHardwareType::any(), true).await;
     env.rms_sim
         .queue_update_firmware_response(
             librms::protos::rack_manager::UpdateFirmwareByDeviceListResponse {
