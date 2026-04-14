@@ -17,11 +17,12 @@
 
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use carbide_uuid::rack::RackId;
-use db::{expected_rack as db_expected_rack, rack as db_rack};
+use db::db_read::DbReader;
+use db::{ObjectColumnFilter, expected_rack as db_expected_rack, rack as db_rack};
 use model::expected_machine::ExpectedMachineData;
 use model::expected_rack::ExpectedRack;
 use model::rack::{
-    FirmwareUpgradeDeviceStatus, FirmwareUpgradeJob, FirmwareUpgradeState, RackConfig,
+    FirmwareUpgradeDeviceStatus, FirmwareUpgradeJob, FirmwareUpgradeState, Rack, RackConfig,
     RackFirmwareUpgradeState, RackMaintenanceState, RackPowerState, RackState, RackValidationState,
 };
 use model::rack_type::{
@@ -314,7 +315,7 @@ async fn test_expected_no_definition_stays_parked(
     )
     .await?;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(txn.as_mut(), &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -429,7 +430,7 @@ async fn test_expected_counts_match_but_not_linked_stays(
 
     create_expected_rack(&pool, &rack_id, "NVL72").await;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -502,7 +503,7 @@ async fn test_expected_zero_topology_transitions_to_discovering(
 
     create_expected_rack(&pool, &rack_id, "Empty").await;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -581,7 +582,7 @@ async fn test_expected_more_discovered_than_expected_transitions(
     )
     .await?;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -707,7 +708,7 @@ async fn test_discovering_empty_rack_transitions_to_maintenance(
     };
     db_rack::update(&mut txn, &rack_id, &cfg).await?;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -760,7 +761,7 @@ async fn test_error_state_does_nothing(
     )
     .await?;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -808,7 +809,7 @@ async fn test_maintenance_completed_transitions_to_validation(
     )
     .await?;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -870,7 +871,7 @@ async fn test_ready_with_no_labels_stays_ready(
     )
     .await?;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -915,7 +916,7 @@ async fn test_firmware_upgrade_start_without_default_skips_to_configure_nmx_clus
     )
     .await;
     let (rack_id, host) = create_single_compute_rack(&env, &pool).await?;
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -994,7 +995,7 @@ async fn test_firmware_upgrade_start_with_unavailable_default_skips_to_configure
         false,
     )
     .await;
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -1084,7 +1085,7 @@ async fn test_firmware_upgrade_start_transitions_to_wait_for_complete(
         )
         .await;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -1138,7 +1139,7 @@ async fn test_firmware_upgrade_start_transitions_to_wait_for_complete(
         host.host_snapshot.id.to_string()
     );
 
-    let persisted_rack = db_rack::get(&pool, &rack_id).await?;
+    let persisted_rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     let job = persisted_rack
         .firmware_upgrade_job
         .expect("rack firmware job should be persisted");
@@ -1196,7 +1197,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_while_jobs_running(
         })
         .await;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
         status: Some("in_progress".to_string()),
@@ -1285,7 +1286,7 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
         })
         .await;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
         status: Some("in_progress".to_string()),
@@ -1398,7 +1399,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
         })
         .await;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
         status: Some("in_progress".to_string()),
@@ -1496,7 +1497,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
         })
         .await;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     let mut outcome = handler_instance
         .handle_object_state(&rack_id, &mut rack, &fw_state, &mut ctx)
         .await?;
@@ -1563,7 +1564,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
         })
         .await;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
         status: Some("in_progress".to_string()),
@@ -1608,7 +1609,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
         "Expected Wait while RMS job lookup is unavailable"
     );
 
-    let persisted_rack = db_rack::get(&pool, &rack_id).await?;
+    let persisted_rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     let job = persisted_rack
         .firmware_upgrade_job
         .expect("rack firmware job should still be persisted");
@@ -1642,7 +1643,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
         .set_firmware_job_error("child-job-1", "mock transport failure")
         .await;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
         job_id: Some("batch-job-1".to_string()),
         status: Some("in_progress".to_string()),
@@ -1687,7 +1688,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_on_transient_poll_error
         "Expected Wait while RMS polling has a transport error"
     );
 
-    let persisted_rack = db_rack::get(&pool, &rack_id).await?;
+    let persisted_rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     let job = persisted_rack
         .firmware_upgrade_job
         .expect("rack firmware job should still be persisted");
@@ -1724,7 +1725,7 @@ async fn test_configure_nmx_cluster_transitions_to_completed(
     )
     .await?;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -1794,7 +1795,7 @@ async fn test_ready_topology_changed_transitions_to_discovering(
     };
     db_rack::update(&mut txn, &rack_id, &cfg).await?;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -1854,7 +1855,7 @@ async fn test_ready_reprovision_requested_transitions_to_maintenance(
     };
     db_rack::update(&mut txn, &rack_id, &cfg).await?;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -1908,7 +1909,7 @@ async fn test_validation_failed_transitions_to_error(
     )
     .await?;
 
-    let mut rack = db_rack::get(&pool, &rack_id).await?;
+    let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     let handler_instance = RackStateHandler::default();
     let mut services = env.state_handler_services();
@@ -1936,4 +1937,15 @@ async fn test_validation_failed_transitions_to_error(
     );
 
     Ok(())
+}
+
+async fn get_db_rack<DB>(conn: &mut DB, rack_id: &RackId) -> Rack
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    db_rack::find_by(conn, ObjectColumnFilter::One(db_rack::IdColumn, rack_id))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
 }
