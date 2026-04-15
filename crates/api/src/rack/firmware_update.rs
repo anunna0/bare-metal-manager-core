@@ -20,9 +20,7 @@ use std::collections::HashMap;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
-use db::{
-    machine as db_machine, machine_topology as db_machine_topology, switch as db_switch,
-};
+use db::{machine as db_machine, machine_topology as db_machine_topology, switch as db_switch};
 use eyre::{Result, eyre};
 use forge_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
