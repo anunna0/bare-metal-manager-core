@@ -186,7 +186,7 @@ fn rack_firmware_status(rack: &model::rack::Rack) -> rpc::FirmwareUpdateStatus {
         .map(Into::into);
 
     rpc::FirmwareUpdateStatus {
-        result: Some(success_result(&rack.id.to_string())),
+        result: Some(success_result(rack.id.as_ref())),
         state,
         target_version: requested_version.unwrap_or_default(),
         updated_at,
@@ -993,7 +993,7 @@ pub(crate) async fn get_component_firmware_status(
                     rack_by_id.get(rack_id).map(rack_firmware_status).unwrap_or(
                         rpc::FirmwareUpdateStatus {
                             result: Some(not_found_component_result(
-                                &rack_id.to_string(),
+                                rack_id.as_ref(),
                                 format!("rack {rack_id} not found"),
                             )),
                             state: rpc::FirmwareUpdateState::FwStateUnknown as i32,
@@ -1151,7 +1151,7 @@ pub(crate) async fn list_component_firmware_versions(
                     let Some(rack) = rack_by_id.get(rack_id) else {
                         return rpc::DeviceFirmwareVersions {
                             result: Some(not_found_component_result(
-                                &rack_id.to_string(),
+                                rack_id.as_ref(),
                                 format!("rack {rack_id} not found"),
                             )),
                             versions: vec![],
@@ -1161,7 +1161,7 @@ pub(crate) async fn list_component_firmware_versions(
                     let Some(profile_id) = rack.rack_profile_id.as_ref() else {
                         return rpc::DeviceFirmwareVersions {
                             result: Some(invalid_argument_component_result(
-                                &rack_id.to_string(),
+                                rack_id.as_ref(),
                                 format!("rack {rack_id} has no rack_profile_id"),
                             )),
                             versions: vec![],
@@ -1172,7 +1172,7 @@ pub(crate) async fn list_component_firmware_versions(
                     else {
                         return rpc::DeviceFirmwareVersions {
                             result: Some(not_found_component_result(
-                                &rack_id.to_string(),
+                                rack_id.as_ref(),
                                 format!("rack profile {profile_id} not found"),
                             )),
                             versions: vec![],
@@ -1182,7 +1182,7 @@ pub(crate) async fn list_component_firmware_versions(
                     let Some(rack_hardware_type) = profile.rack_hardware_type.as_ref() else {
                         return rpc::DeviceFirmwareVersions {
                             result: Some(invalid_argument_component_result(
-                                &rack_id.to_string(),
+                                rack_id.as_ref(),
                                 format!(
                                     "rack profile {profile_id} does not define rack_hardware_type"
                                 ),
@@ -1201,7 +1201,7 @@ pub(crate) async fn list_component_firmware_versions(
                         .collect();
 
                     rpc::DeviceFirmwareVersions {
-                        result: Some(success_result(&rack_id.to_string())),
+                        result: Some(success_result(rack_id.as_ref())),
                         versions,
                     }
                 })
