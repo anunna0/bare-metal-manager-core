@@ -684,7 +684,6 @@ pub(crate) async fn update_component_firmware(
     request: Request<rpc::UpdateComponentFirmwareRequest>,
 ) -> Result<Response<rpc::UpdateComponentFirmwareResponse>, Status> {
     log_request_data(&request);
-    let cm = require_component_manager(api)?;
     let req = request.into_inner();
 
     let target = req
@@ -758,6 +757,7 @@ pub(crate) async fn update_component_firmware(
             rack_machine_ids = list.machine_ids.iter().map(|id| id.to_string()).collect();
         }
         rpc::update_component_firmware_request::Target::PowerShelves(t) => {
+            let cm = require_component_manager(api)?;
             let list = t
                 .power_shelf_ids
                 .ok_or_else(|| Status::invalid_argument("power_shelf_ids is required"))?;
