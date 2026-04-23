@@ -147,25 +147,39 @@ fn firmware_job_state(job: &FirmwareUpgradeJob) -> i32 {
         }
     }
 
-    let total = job.all_devices().count();
-    let completed = job
-        .all_devices()
+    let devices: Vec<_> = job.all_devices().collect();
+    let total = devices.len();
+
+    if total == 0 {
+        return rpc::FirmwareUpdateState::FwStateUnknown as i32;
+    }
+
+    let completed = devices
+        .iter()
         .filter(|device| device.status == "completed")
         .count();
-    let failed = job
-        .all_devices()
+    let failed = devices
+        .iter()
         .filter(|device| device.status == "failed")
         .count();
     let terminal = completed + failed;
+    let has_in_progress = devices
+        .iter()
+        .any(|device| matches!(device.status.as_str(), "in_progress" | "running" | "active"));
+    let all_queued = devices
+        .iter()
+        .all(|device| matches!(device.status.as_str(), "pending" | "queued" | "started"));
 
-    if total > 0 && completed == total {
-        rpc::FirmwareUpdateState::FwStateCompleted as i32
-    } else if total > 0 && failed > 0 && terminal == total {
+    if failed > 0 && terminal == total {
         rpc::FirmwareUpdateState::FwStateFailed as i32
-    } else if job.started_at.is_some() {
+    } else if completed == total {
+        rpc::FirmwareUpdateState::FwStateCompleted as i32
+    } else if terminal > 0 || has_in_progress || job.started_at.is_some() {
         rpc::FirmwareUpdateState::FwStateInProgress as i32
-    } else {
+    } else if all_queued {
         rpc::FirmwareUpdateState::FwStateQueued as i32
+    } else {
+        rpc::FirmwareUpdateState::FwStateUnknown as i32
     }
 }
 
@@ -1221,6 +1235,18 @@ mod tests {
 
     use super::*;
 
+    fn firmware_device(status: &str) -> model::rack::FirmwareUpgradeDeviceStatus {
+        model::rack::FirmwareUpgradeDeviceStatus {
+            node_id: String::new(),
+            mac: "00:00:00:00:00:00".to_string(),
+            bmc_ip: String::new(),
+            status: status.to_string(),
+            job_id: None,
+            parent_job_id: None,
+            error_message: None,
+        }
+    }
+
     #[test]
     fn error_to_status_unavailable() {
         let st =
@@ -1310,6 +1336,96 @@ mod tests {
     fn power_action_invalid_value() {
         let err = map_power_action(9999).unwrap_err();
         assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[test]
+    fn firmware_job_state_explicit_status_wins_for_empty_job() {
+        let job = FirmwareUpgradeJob {
+            status: Some("queued".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            firmware_job_state(&job),
+            rpc::FirmwareUpdateState::FwStateQueued as i32
+        );
+    }
+
+    #[test]
+    fn firmware_job_state_empty_job_without_status_is_unknown() {
+        assert_eq!(
+            firmware_job_state(&FirmwareUpgradeJob::default()),
+            rpc::FirmwareUpdateState::FwStateUnknown as i32
+        );
+    }
+
+    #[test]
+    fn firmware_job_state_all_completed_is_completed() {
+        let job = FirmwareUpgradeJob {
+            machines: vec![firmware_device("completed")],
+            switches: vec![firmware_device("completed")],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            firmware_job_state(&job),
+            rpc::FirmwareUpdateState::FwStateCompleted as i32
+        );
+    }
+
+    #[test]
+    fn firmware_job_state_mixed_terminal_with_failure_is_failed() {
+        let job = FirmwareUpgradeJob {
+            machines: vec![firmware_device("completed")],
+            switches: vec![firmware_device("failed")],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            firmware_job_state(&job),
+            rpc::FirmwareUpdateState::FwStateFailed as i32
+        );
+    }
+
+    #[test]
+    fn firmware_job_state_partial_terminal_is_in_progress() {
+        let job = FirmwareUpgradeJob {
+            machines: vec![firmware_device("completed")],
+            switches: vec![firmware_device("pending")],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            firmware_job_state(&job),
+            rpc::FirmwareUpdateState::FwStateInProgress as i32
+        );
+    }
+
+    #[test]
+    fn firmware_job_state_all_pending_without_start_is_queued() {
+        let job = FirmwareUpgradeJob {
+            machines: vec![firmware_device("pending")],
+            switches: vec![firmware_device("queued")],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            firmware_job_state(&job),
+            rpc::FirmwareUpdateState::FwStateQueued as i32
+        );
+    }
+
+    #[test]
+    fn firmware_job_state_unknown_device_status_is_unknown() {
+        let job = FirmwareUpgradeJob {
+            machines: vec![firmware_device("mystery")],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            firmware_job_state(&job),
+            rpc::FirmwareUpdateState::FwStateUnknown as i32
+        );
     }
 
     #[test]
