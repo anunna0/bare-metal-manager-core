@@ -1978,6 +1978,20 @@ message FabricManagerConfig {
   map<string, string> config_map = 1;
 }
 
+enum FabricManagerState {
+  FABRIC_MANAGER_STATE_UNSPECIFIED = 0;
+  FABRIC_MANAGER_STATE_OK = 1;
+  FABRIC_MANAGER_STATE_NOT_OK = 2;
+  FABRIC_MANAGER_STATE_UNKNOWN = 3;
+}
+
+message FabricManagerStatus {
+  FabricManagerState fabric_manager_state = 1;
+  optional string addition_info = 2;
+  optional string reason = 3;
+  optional string error_message = 4;
+}
+
 // Describe the status and applied configuration of a Switch
 message SwitchStatus {
   // The result of last state controller run - its outcome and an optional reason for that outcome
@@ -2000,6 +2014,8 @@ message SwitchStatus {
   repeated HealthSourceOrigin health_sources = 8;
   // Lifecycle related status
   LifecycleStatus lifecycle = 9;
+  optional string fabric_manager_status = 10;
+  optional FabricManagerStatus fabric_manager_status_details = 11;
 }
 
 message PlacementInRack {
@@ -2032,8 +2048,8 @@ message Switch {
   // The rack that this switch is associated with
   optional common.RackId rack_id = 10;
   optional PlacementInRack placement_in_rack = 11;
-
   reserved 12, 13;
+  bool is_primary = 14;
 }
 
 message SwitchList {
